@@ -47,6 +47,8 @@ docs/               spec.md, decisions.md
 
 ## Commands
 (Fill in as they are created, e.g. `python -m jobs.ingest --since 7d`, `pytest`.)
+- Apply migrations, in order:
+  `for f in db/migrations/*.sql; do psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$f" || break; done`
 
 ## Open questions (waiting on client)
 - Geography for MVP (DFW first?), SOSDirect access, producer assignment rule
