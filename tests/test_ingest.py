@@ -111,12 +111,14 @@ def test_run_inserts_dedupes_and_records_job_run(db):
 
     counts = dict(conn.execute(
         "SELECT source_system, count(*) FROM raw_entities GROUP BY 1").fetchall())
-    assert counts == {"comptroller": 4, "sos": 4}
+    # The franchise fixture's booster club is a non-profit (CN) and is excluded.
+    assert counts == {"comptroller": 4, "sos": 3}
 
     runs = conn.execute(
         "SELECT status, success_count, error_count, details, finished_at IS NOT NULL"
         " FROM job_runs ORDER BY started_at").fetchall()
-    assert [r[:3] for r in runs] == [("succeeded", 8, 0), ("succeeded", 0, 0)]
+    assert [r[:3] for r in runs] == [("succeeded", 7, 0), ("succeeded", 0, 0)]
+    assert runs[0][3]["sources"]["franchise_tax"]["excluded"] == 1
     assert runs[1][3]["sources"]["sales_tax"]["duplicates"] == 4
     assert all(r[4] for r in runs)
 
@@ -158,3 +160,44 @@ def test_invalid_rows_count_as_errors(db):
         "SELECT status, error_count, details FROM job_runs").fetchone()
     assert (status, errors) == ("succeeded", 1)
     assert "zip" in details["errors"][0]
+
+
+class Rows(FakeSocrata):
+    """Serves the given rows for the sales tax dataset and nothing for the others."""
+
+    def __init__(self, rows):
+        super().__init__()
+        self.rows = rows
+
+    def query(self, dataset_id, where):
+        return iter(self.rows) if dataset_id == "jrea-zgmq" else iter([])
+
+
+def test_non_profits_are_excluded(db):
+    dsn, conn = db
+    rows = load_fixture("socrata_sales_tax.json")
+    rows[0] = dict(rows[0], taxpayer_organization_type="CN")
+    rows[1] = dict(rows[1], taxpayer_organization_type="CM")
+
+    assert ingest.run(date(2026, 9, 1), dsn=dsn, socrata=Rows(rows))
+    assert conn.execute("SELECT count(*) FROM raw_entities").fetchone()[0] == 2
+    details = conn.execute("SELECT details FROM job_runs").fetchone()[0]
+    assert details["sources"]["sales_tax"]["excluded"] == 2
+
+
+def test_addresses_shared_by_five_entities_are_flagged(db):
+    dsn, conn = db
+    base = load_fixture("socrata_sales_tax.json")[0]
+    shared = [dict(base, outlet_name=f"TENANT {i} LLC", outlet_number=str(i)) for i in range(4)]
+    lone = load_fixture("socrata_sales_tax.json")[1]
+
+    ingest.run(date(2026, 9, 1), dsn=dsn, socrata=Rows(shared + [lone]))
+    assert conn.execute(
+        "SELECT count(*) FROM raw_entities WHERE shared_address").fetchone()[0] == 0
+
+    # A fifth entity at the same address flags all five on the next run.
+    fifth = dict(base, outlet_name="TENANT 4 LLC", outlet_number="4")
+    ingest.run(date(2026, 9, 1), dsn=dsn, socrata=Rows([fifth]))
+    flagged = conn.execute(
+        "SELECT business_name FROM raw_entities WHERE shared_address ORDER BY 1").fetchall()
+    assert [r[0] for r in flagged] == [f"TENANT {i} LLC" for i in range(5)]

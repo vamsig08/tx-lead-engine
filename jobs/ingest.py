@@ -49,6 +49,13 @@ INSERT_SQL = """
     RETURNING id
 """
 
+FLAG_SHARED_ADDRESSES_SQL = """
+    UPDATE raw_entities r
+    SET shared_address = s.n >= %(min)s
+    FROM (SELECT address_key, count(*) AS n FROM raw_entities GROUP BY address_key) s
+    WHERE r.address_key = s.address_key AND r.shared_address <> (s.n >= %(min)s)
+"""
+
 
 def parse_since(value: str, today: date) -> date:
     """'7d' means 7 days before today; otherwise an ISO date."""
@@ -97,11 +104,14 @@ def normalize(row: dict, source: dict) -> RawEntity:
 
 
 def ingest_source(name: str, source: dict, rows, conn: psycopg.Connection | None,
-                  run: JobRun | None) -> dict:
+                  run: JobRun | None, exclude_org_types: frozenset[str] = frozenset()) -> dict:
     """Normalise and insert one source's rows. conn=None is a dry run."""
-    counts = {"fetched": 0, "inserted": 0, "duplicates": 0, "invalid": 0}
+    counts = {"fetched": 0, "excluded": 0, "inserted": 0, "duplicates": 0, "invalid": 0}
     for row in rows:
         counts["fetched"] += 1
+        if _clean(row.get(source["org_type_field"])) in exclude_org_types:
+            counts["excluded"] += 1
+            continue
         try:
             entity = normalize(row, source)
         except ValidationError as exc:
@@ -127,6 +137,7 @@ def run(since: date | None = None, only_source: str | None = None, dry_run: bool
     """Run Job 1. Returns False if any source failed."""
     config = load_config("sources.yaml")
     counties = list(config["counties"])
+    exclude_org_types = frozenset(config.get("exclude_org_types", []))
     sources = {
         name: s for name, s in config["sources"].items()
         if s["enabled"] and (only_source is None or name == only_source)
@@ -147,7 +158,8 @@ def run(since: date | None = None, only_source: str | None = None, dry_run: bool
             log.info("%s: querying %s where %s", name, source["dataset_id"], where)
             try:
                 counts = ingest_source(
-                    name, source, socrata.query(source["dataset_id"], where), conn, job
+                    name, source, socrata.query(source["dataset_id"], where), conn, job,
+                    exclude_org_types,
                 )
             except Exception as exc:
                 ok = False
@@ -168,6 +180,9 @@ def run(since: date | None = None, only_source: str | None = None, dry_run: bool
             if since:
                 job.details["since"] = since.isoformat()
             ok = process(conn, job)
+            min_entities = load_config("thresholds.yaml")["shared_address_min_entities"]
+            flagged = conn.execute(FLAG_SHARED_ADDRESSES_SQL, {"min": min_entities}).rowcount
+            job.details["shared_address_flags_changed"] = flagged
             job.failed = not ok
             return ok
     finally:

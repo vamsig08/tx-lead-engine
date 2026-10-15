@@ -16,6 +16,12 @@ counties:
   "220": Tarrant
   "249": Wise
 
+# Organisation types to skip (codes from the dataset's record layout, "Franchise Layout.docx" on
+# data.texas.gov). CN = Texas non-profit corporation, CM = foreign non-profit corporation.
+# AR ("other association") is kept: it mixes PTAs with ordinary businesses.
+# Pending client confirmation.
+exclude_org_types: [CN, CM]
+
 socrata:
   base_url: https://data.texas.gov
   page_size: 1000
@@ -33,6 +39,7 @@ sources:
     lookback_days: 14
     date_field: outlet_permit_issue_date
     county_field: outlet_county_code
+    org_type_field: taxpayer_organization_type
     fields:
       business_name: [outlet_name, taxpayer_name]
       address_line1: outlet_address
@@ -53,6 +60,7 @@ sources:
     lookback_days: 45
     date_field: sos_charter_date
     county_field: taxpayer_county_code
+    org_type_field: taxpayer_organizational_type
     fields:
       business_name: [taxpayer_name]
       address_line1: taxpayer_address

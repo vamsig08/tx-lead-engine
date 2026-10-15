@@ -1,0 +1,3 @@
+# Job 1: an address shared by at least this many raw_entities rows is flagged
+# shared_address (likely a registered agent or mail drop). Pending client confirmation.
+shared_address_min_entities: 5

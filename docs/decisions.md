@@ -57,15 +57,21 @@
 - **Counts**: `success_count` = rows inserted. Duplicates are not errors (per-source counts in
   `job_runs.details`). Rows missing name/address/city/zip are errors. A source that fails after
   retries marks the run `failed` (exit code 1) but the other sources still run.
-- **Volume** (first live run, 2026-10-14): 1,795 sales-tax + 10,035 franchise rows inserted for the
-  45/14-day backfill; steady state is roughly 900 + 1,500 rows/week. Franchise NAICS is filled for
-  ~4% of rows.
+- **Volume** (live run, 2026-10-14, after excluding non-profits): 1,779 sales-tax + 9,574 franchise
+  rows for the 14/45-day backfill. Steady state for DFW is about 1,040 sales-tax + 2,340 franchise
+  rows/week (~3,400). Franchise NAICS is filled for ~4% of rows.
+- **Non-profits excluded** (pending client confirmation): rows whose organisation type is `CN`
+  (Texas non-profit corporation) or `CM` (foreign non-profit corporation) are skipped and counted as
+  `excluded`. Codes from the dataset's record layout ("Franchise Layout.docx" on data.texas.gov);
+  both datasets use the same codes. `AR` ("other association") is kept: it mixes PTAs with
+  businesses. ~460 franchise and ~16 sales-tax rows in the backfill were excluded.
+- **Shared-address flag** (pending client confirmation): `raw_entities.shared_address` is true when
+  at least `shared_address_min_entities` (config/thresholds.yaml, 5) rows share `address_key`
+  (address line 1 + zip5, normalised like `dedupe_key`). Rows are kept; Job 1 recomputes the flag
+  across the whole table after each run. Migration `0006`. ~7.7% of franchise rows are flagged.
 
 ### To raise with the client
 
-- Franchise addresses are mailing/registered-agent addresses: 7% of DFW SOS rows sit at an address
-  shared by 5+ entities (312 at one Bryan St suite). Filter these, or rely on Job 2 to find the
-  real location?
-- Franchise rows include non-profits and holding/real-estate LLCs. Filter by organisation type
-  in Job 1, or leave it to Job 3's scoring?
+- Confirm the defaults above: exclude non-profits (CN, CM) in Job 1; keep registered-agent
+  addresses but flag them (`shared_address`). 312 DFW SOS rows sit at one Bryan St suite.
 - Some sales-tax outlet names are just an address (e.g. "531 BEDFORD ROAD APT 104").
