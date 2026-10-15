@@ -1,0 +1,63 @@
+# Job 1 (ingest) sources. Both are Texas Comptroller datasets on data.texas.gov (Socrata).
+#
+# County codes are the Comptroller's 3-digit codes (alphabetical, 001-254; 000 = out of state).
+# The two datasets format them differently ("057" vs "57"), so the job matches both forms.
+# MVP geography: DFW. Edit this list to widen or narrow it.
+counties:
+  "043": Collin
+  "057": Dallas
+  "061": Denton
+  "070": Ellis
+  "116": Hunt
+  "126": Johnson
+  "129": Kaufman
+  "184": Parker
+  "199": Rockwall
+  "220": Tarrant
+  "249": Wise
+
+socrata:
+  base_url: https://data.texas.gov
+  page_size: 1000
+  timeout_seconds: 60
+
+# lookback_days: each run re-queries this many days of filing dates. The datasets are
+# published with a lag (sales tax ~4-5 days, franchise tax ~2-3 weeks), so the spec's 7-day
+# window would miss records. Overlap between runs is harmless: inserts are deduplicated.
+sources:
+  # New sales tax outlets. Physical outlet address and NAICS are usually present.
+  sales_tax:
+    enabled: true
+    dataset_id: jrea-zgmq
+    source_system: comptroller
+    lookback_days: 14
+    date_field: outlet_permit_issue_date
+    county_field: outlet_county_code
+    fields:
+      business_name: [outlet_name, taxpayer_name]
+      address_line1: outlet_address
+      city: outlet_city
+      state: outlet_state
+      zip: outlet_zip_code
+      naics_code: outlet_naics_code
+    # Joined with "-" to form source_record_id.
+    record_id_fields: [taxpayer_number, outlet_number]
+
+  # New SOS entities (LLCs, corporations), via the Comptroller's franchise tax roll.
+  # The address is the taxpayer's mailing address, often a registered agent.
+  # NAICS is rarely filled in (~4% of recent rows), and its column name is "_621111".
+  franchise_tax:
+    enabled: true
+    dataset_id: 9cir-efmm
+    source_system: sos
+    lookback_days: 45
+    date_field: sos_charter_date
+    county_field: taxpayer_county_code
+    fields:
+      business_name: [taxpayer_name]
+      address_line1: taxpayer_address
+      city: taxpayer_city
+      state: taxpayer_state
+      zip: taxpayer_zip
+      naics_code: _621111
+    record_id_fields: [secretary_of_state_sos_or_coa_file_number]

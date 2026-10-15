@@ -46,7 +46,11 @@ docs/               spec.md, decisions.md
 - Log important decisions in `docs/decisions.md`.
 
 ## Commands
-(Fill in as they are created, e.g. `python -m jobs.ingest --since 7d`, `pytest`.)
+- Install: `uv sync` (Python 3.12; deps in `pyproject.toml`). Prefix commands with `uv run`.
+- Job 1: `uv run python -m jobs.ingest [--since 14d|YYYY-MM-DD] [--source sales_tax] [--dry-run]`
+  (`--dry-run` needs no database).
+- Tests: `uv run pytest`. DB tests need `TEST_DATABASE_URL` pointing at a migrated database whose
+  name ends in `_test` (it is truncated); otherwise they skip.
 - Apply migrations, in order:
   `for f in db/migrations/*.sql; do psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$f" || break; done`
 
