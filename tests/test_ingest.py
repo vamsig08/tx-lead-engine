@@ -201,3 +201,27 @@ def test_addresses_shared_by_five_entities_are_flagged(db):
     flagged = conn.execute(
         "SELECT business_name FROM raw_entities WHERE shared_address ORDER BY 1").fetchall()
     assert [r[0] for r in flagged] == [f"TENANT {i} LLC" for i in range(5)]
+
+
+def test_icp_result_is_stored_and_stale_rows_reclassified(db):
+    dsn, conn = db
+    assert ingest.run(date(2026, 9, 1), dsn=dsn, socrata=FakeSocrata())
+    rows = dict(conn.execute(
+        "SELECT business_name, icp_reason FROM raw_entities WHERE icp_candidate").fetchall())
+    # Sales tax: Great Clips (812111) and Hallin (454110) are not ICP; the lawn care
+    # company (561730) isn't either; the renovation outlet is NAICS 238991.
+    assert rows == {
+        "531 BEDFORD ROAD APT 104": "naics:238991",
+        "LISTINGWITHLYONS LLC": "naics:531210",
+    }
+    assert conn.execute(
+        "SELECT count(*) FROM raw_entities WHERE icp_rule_version IS NULL").fetchone()[0] == 0
+
+    # Rows from an older rule version are re-evaluated on the next run.
+    conn.execute("UPDATE raw_entities SET icp_rule_version = 'old', icp_candidate = NULL")
+    assert ingest.run(date(2026, 9, 1), dsn=dsn, socrata=FakeSocrata())
+    details = conn.execute(
+        "SELECT details FROM job_runs ORDER BY started_at DESC LIMIT 1").fetchone()[0]
+    assert details["icp_reclassified"] == 7
+    assert conn.execute(
+        "SELECT count(*) FROM raw_entities WHERE icp_candidate").fetchone()[0] == 2

@@ -75,3 +75,37 @@
 - Confirm the defaults above: exclude non-profits (CN, CM) in Job 1; keep registered-agent
   addresses but flag them (`shared_address`). 312 DFW SOS rows sit at one Bryan St suite.
 - Some sales-tax outlet names are just an address (e.g. "531 BEDFORD ROAD APT 104").
+
+## 2026-10-15: ICP pre-filter, schema_migrations, dotenv (`0007`, `jobs/icp_filter.py`)
+
+- **Pre-filter before paid APIs.** Job 1 sets `raw_entities.icp_candidate` / `icp_industry` /
+  `icp_reason` / `icp_rule_version`; Job 2 will only search candidates. Rules are in
+  `config/icp_filter.yaml`:
+  1. NAICS prefix, any source (longest prefix wins): 621 medical, 7211 hotel, 722 restaurant,
+     23 contractor, 531 re_investor.
+  2. Otherwise, franchise (`sos`) rows only: whole-word name keywords, strict list. Generic words
+     (`holdings`, `ventures`, `capital`, `investments`, `suites`, `bar`, bare `pllc`) were dropped
+     after sampling showed they mostly matched non-ICP businesses. `PLLC` counts only next to a
+     medical word (therapy, counseling, radiology, care, health, ...). Names ending "RE, LLC" /
+     "RE LP" count as re_investor. `equipment` vetoes re_investor ("equipment rental").
+  Sales-tax rows are NAICS-only (every row has one). Non-candidates are kept, not deleted.
+- **Rule changes**: bump `version` in the config; each Job 1 run re-evaluates rows whose
+  `icp_rule_version` differs.
+- **Weekly volume** (DFW, measured 2026-10-15 on full weeks: sales tax 10-03..10-09, franchise
+  avg of 08-31..09-27): ~3,450 rows in (1,109 sales tax + 2,340 franchise), **~513 pass (15%)**:
+  sales tax 211 (restaurant 134, contractor 46, medical 19, hotel 7, re_investor 5); franchise 302
+  (re_investor 121, contractor 93, medical 57, restaurant 26, hotel 6). ~21/week passing rows
+  have `shared_address`.
+- **Shared addresses**: Job 2 searches them anyway; the flag is kept for Job 3's prompt.
+- **Industry hint**: `icp_industry` will be passed to Job 3 as a hint; the LLM decides
+  `leads_enriched.industry`. Both are stored so disagreement can be measured.
+- **schema_migrations** (0007, backfilled with 0001-0006). Every new migration inserts its own
+  version inside its transaction; `db/migrate.sh` applies only unrecorded files. Databases that
+  already had 0001-0006 (local, Supabase) got 0007 applied directly with psql.
+- **python-dotenv**: each job's `main()` calls `load_dotenv()`, since cron/n8n runs don't source
+  `.env`. Real environment variables take precedence.
+
+### To raise with the client
+
+- Keyword rules miss ICP businesses with uninformative names ("KOBA SOLUTIONS LLC"); those only
+  reach Job 2 if Comptroller NAICS is filled. Acceptable for MVP cost control?

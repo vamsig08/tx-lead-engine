@@ -3,7 +3,9 @@
     python -m jobs.ingest [--since 14d|YYYY-MM-DD] [--source sales_tax] [--dry-run]
 
 Sources, per-source lookback and the county filter live in config/sources.yaml.
---since overrides every source's lookback.
+--since overrides every source's lookback. Each row is also run through the ICP
+pre-filter (config/icp_filter.yaml); rows evaluated under an older rule version are
+re-evaluated at the end of every run.
 """
 import argparse
 import logging
@@ -14,14 +16,18 @@ from typing import Annotated
 
 import psycopg
 from psycopg.types.json import Jsonb
+from dotenv import load_dotenv
 from pydantic import BaseModel, StringConstraints, ValidationError
 
 from integrations.socrata import SocrataClient
 from jobs.common import JobRun, connect, job_run, load_config
+from jobs.icp_filter import IcpFilter
 
 log = logging.getLogger("jobs.ingest")
 
 NonEmpty = Annotated[str, StringConstraints(min_length=1)]
+# Rows per executemany round trip.
+BATCH_SIZE = 500
 
 
 class RawEntity(BaseModel):
@@ -41,10 +47,12 @@ class RawEntity(BaseModel):
 INSERT_SQL = """
     INSERT INTO raw_entities (business_name, owner_name, address_line1, city, state, zip,
                               naics_code, source_system, filing_date, source_record_id,
-                              raw_payload)
+                              raw_payload, icp_candidate, icp_industry, icp_reason,
+                              icp_rule_version)
     VALUES (%(business_name)s, %(owner_name)s, %(address_line1)s, %(city)s, %(state)s,
             %(zip)s, %(naics_code)s, %(source_system)s, %(filing_date)s,
-            %(source_record_id)s, %(raw_payload)s)
+            %(source_record_id)s, %(raw_payload)s, %(icp_candidate)s, %(icp_industry)s,
+            %(icp_reason)s, %(icp_rule_version)s)
     ON CONFLICT DO NOTHING
     RETURNING id
 """
@@ -54,6 +62,18 @@ FLAG_SHARED_ADDRESSES_SQL = """
     SET shared_address = s.n >= %(min)s
     FROM (SELECT address_key, count(*) AS n FROM raw_entities GROUP BY address_key) s
     WHERE r.address_key = s.address_key AND r.shared_address <> (s.n >= %(min)s)
+"""
+
+STALE_ICP_SQL = """
+    SELECT id, business_name, naics_code, source_system FROM raw_entities
+    WHERE icp_rule_version IS DISTINCT FROM %s
+"""
+
+UPDATE_ICP_SQL = """
+    UPDATE raw_entities
+    SET icp_candidate = %(icp_candidate)s, icp_industry = %(icp_industry)s,
+        icp_reason = %(icp_reason)s, icp_rule_version = %(icp_rule_version)s
+    WHERE id = %(id)s
 """
 
 
@@ -103,10 +123,40 @@ def normalize(row: dict, source: dict) -> RawEntity:
     )
 
 
+def icp_params(icp: IcpFilter, business_name: str, naics_code: str | None,
+               source_system: str) -> dict:
+    result = icp.classify(business_name, naics_code, source_system)
+    return {
+        "icp_candidate": result.candidate,
+        "icp_industry": result.industry,
+        "icp_reason": result.reason,
+        "icp_rule_version": icp.version,
+    }
+
+
+def _insert_batch(conn: psycopg.Connection, batch: list[dict], counts: dict,
+                  run: JobRun) -> None:
+    with conn.cursor() as cur:
+        cur.executemany(INSERT_SQL, batch, returning=True)
+        for params in batch:
+            if cur.fetchone():
+                counts["inserted"] += 1
+                run.success_count += 1
+                if params["icp_candidate"]:
+                    counts["inserted_icp_candidates"] += 1
+            else:
+                counts["duplicates"] += 1
+            cur.nextset()
+    batch.clear()
+
+
 def ingest_source(name: str, source: dict, rows, conn: psycopg.Connection | None,
-                  run: JobRun | None, exclude_org_types: frozenset[str] = frozenset()) -> dict:
-    """Normalise and insert one source's rows. conn=None is a dry run."""
-    counts = {"fetched": 0, "excluded": 0, "inserted": 0, "duplicates": 0, "invalid": 0}
+                  run: JobRun | None, icp: IcpFilter,
+                  exclude_org_types: frozenset[str] = frozenset()) -> dict:
+    """Normalise, pre-filter and insert one source's rows. conn=None is a dry run."""
+    counts = {"fetched": 0, "excluded": 0, "invalid": 0, "icp_candidates": 0,
+              "inserted": 0, "inserted_icp_candidates": 0, "duplicates": 0}
+    batch: list[dict] = []
     for row in rows:
         counts["fetched"] += 1
         if _clean(row.get(source["org_type_field"])) in exclude_org_types:
@@ -120,16 +170,33 @@ def ingest_source(name: str, source: dict, rows, conn: psycopg.Connection | None
             if run:
                 run.error(f"{name}: invalid row {row.get(source['record_id_fields'][0])}: {missing}")
             continue
+        params = entity.model_dump()
+        params.update(icp_params(icp, entity.business_name, entity.naics_code,
+                                 entity.source_system))
+        if params["icp_candidate"]:
+            counts["icp_candidates"] += 1
         if conn is None:
             continue
-        params = entity.model_dump()
         params["raw_payload"] = Jsonb(params["raw_payload"])
-        if conn.execute(INSERT_SQL, params).fetchone():
-            counts["inserted"] += 1
-            run.success_count += 1
-        else:
-            counts["duplicates"] += 1
+        batch.append(params)
+        if len(batch) >= BATCH_SIZE:
+            _insert_batch(conn, batch, counts, run)
+    if batch:
+        _insert_batch(conn, batch, counts, run)
     return counts
+
+
+def reclassify_stale(conn: psycopg.Connection, icp: IcpFilter) -> int:
+    """Re-run the pre-filter on rows evaluated under another rule version (or never)."""
+    rows = conn.execute(STALE_ICP_SQL, (icp.version,)).fetchall()
+    updates = [
+        {"id": row_id, **icp_params(icp, name, naics, source_system)}
+        for row_id, name, naics, source_system in rows
+    ]
+    if updates:
+        with conn.cursor() as cur:
+            cur.executemany(UPDATE_ICP_SQL, updates)
+    return len(updates)
 
 
 def run(since: date | None = None, only_source: str | None = None, dry_run: bool = False,
@@ -138,6 +205,7 @@ def run(since: date | None = None, only_source: str | None = None, dry_run: bool
     config = load_config("sources.yaml")
     counties = list(config["counties"])
     exclude_org_types = frozenset(config.get("exclude_org_types", []))
+    icp = IcpFilter(load_config("icp_filter.yaml"))
     sources = {
         name: s for name, s in config["sources"].items()
         if s["enabled"] and (only_source is None or name == only_source)
@@ -159,7 +227,7 @@ def run(since: date | None = None, only_source: str | None = None, dry_run: bool
             try:
                 counts = ingest_source(
                     name, source, socrata.query(source["dataset_id"], where), conn, job,
-                    exclude_org_types,
+                    icp, exclude_org_types,
                 )
             except Exception as exc:
                 ok = False
@@ -183,6 +251,8 @@ def run(since: date | None = None, only_source: str | None = None, dry_run: bool
             min_entities = load_config("thresholds.yaml")["shared_address_min_entities"]
             flagged = conn.execute(FLAG_SHARED_ADDRESSES_SQL, {"min": min_entities}).rowcount
             job.details["shared_address_flags_changed"] = flagged
+            job.details["icp_rule_version"] = icp.version
+            job.details["icp_reclassified"] = reclassify_stale(conn, icp)
             job.failed = not ok
             return ok
     finally:
@@ -198,6 +268,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true",
                         help="fetch and validate only; no database writes")
     args = parser.parse_args(argv)
+    # Scheduled runs (cron/n8n) don't source .env, so load it here. Real env vars win.
+    load_dotenv()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     since = parse_since(args.since, date.today()) if args.since else None
     ok = run(since, args.source, args.dry_run)

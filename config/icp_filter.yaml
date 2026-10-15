@@ -1,0 +1,54 @@
+# ICP pre-filter (Job 1). Decides which raw_entities reach Job 2's paid Places search.
+# Bump `version` after any change: Job 1 re-evaluates rows evaluated under another version.
+version: "2026-10-15.1"
+
+# 1. NAICS prefix -> industry. Checked first, for every source.
+naics_prefixes:
+  "621": medical
+  "7211": hotel
+  "722": restaurant
+  "23": contractor
+  "531": re_investor
+
+# 2. Business-name rules, only for rows without an ICP NAICS match and only for these sources.
+#    (Sales tax rows always carry NAICS, so names are not used for them.)
+name_rule_sources: [sos]
+
+# Patterns are case-insensitive Python regex fragments, matched as whole words.
+# Single-quote them (YAML leaves backslashes alone inside single quotes).
+# Industries are tried in this order; the first match wins.
+name_rules:
+  medical:
+    any: ['clinics?', 'medical', 'medicine', 'health ?care', 'dental', 'dentistry', 'dds',
+          'orthodontics?', 'chiropractic', 'physical therapy', 'pediatrics?', 'dermatology',
+          'family practice', 'urgent care', 'physicians?', 'md', 'pharmacy', 'optometry',
+          'hospice', 'home health', 'surgery', 'surgical', 'med ?spa', 'anesthesia',
+          'anesthesiology']
+    # "PLLC" alone also covers lawyers and accountants: it counts only next to one of these.
+    pllc_with_any: ['anesthe\w*', 'therap\w*', 'pediatric\w*', 'clinic\w*', 'dental', 'dentistry',
+                    'health\w*', 'care', 'wellness', 'counseling', 'psychiatr\w*', 'psycholog\w*',
+                    'nursing', 'speech', 'rehab\w*', 'ortho\w*', 'podiatr\w*', 'cardi\w*',
+                    'oncology', 'radiology', 'imaging', 'vascular', 'vein', 'spine', 'pain',
+                    'sleep', 'womens?', 'obstetric\w*', 'gynecolog\w*', 'neurolog\w*', 'gastro\w*',
+                    'urology', 'allergy', 'ent', 'eye', 'vision', 'hearing', 'primary']
+  hotel:
+    any: ['hotels?', 'motel', 'lodging', 'inn',
+          'hospitality(?= (?:llc|inc|group|partners|management)\b)']
+  restaurant:
+    any: ['restaurant', 'cafe', 'grill', 'kitchen', 'eatery', 'bistro', 'pizza', 'pizzeria',
+          'tacos?', 'taqueria', 'bbq', 'barbecue', 'burgers?', 'sushi', 'ramen', 'diner', 'bakery',
+          'catering', 'coffee', 'donuts?', 'wings', 'brewing', 'brewery', 'cantina', 'seafood',
+          'steakhouse']
+  contractor:
+    any: ['construction', 'constructors?', 'contracting', 'contractors?', 'builders?', 'roofing',
+          'plumbing', 'electrical contractors?', 'hvac', 'air conditioning', 'remodeling',
+          'renovations?', 'restoration', 'concrete', 'drywall', 'painting', 'flooring', 'framing',
+          'masonry', 'fencing', 'landscaping', 'excavation', 'paving', 'welding', 'insulation',
+          'cabinets?', 'countertops', 'solar', 'pools?', 'foundation repair', 'demolition']
+  re_investor:
+    # The last pattern matches names ending "RE, LLC" / "RE LP" (real-estate holding entities).
+    any: ['properties', 'property', 'realty', 'real estate', 'rentals?', 'acquisitions?', 'land',
+          'estates', 'residential', 'homes', 'housing', 'apartments?', 'investors?',
+          're(?=,? (?:llc|l\.l\.c\.|lp|l\.p\.|ltd)\.?$)']
+    # Never matches if the name also contains one of these.
+    unless_any: ['equipment']

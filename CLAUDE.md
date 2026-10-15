@@ -48,11 +48,14 @@ docs/               spec.md, decisions.md
 ## Commands
 - Install: `uv sync` (Python 3.12; deps in `pyproject.toml`). Prefix commands with `uv run`.
 - Job 1: `uv run python -m jobs.ingest [--since 14d|YYYY-MM-DD] [--source sales_tax] [--dry-run]`
-  (`--dry-run` needs no database).
+  (`--dry-run` needs no database). Also applies the ICP pre-filter (`config/icp_filter.yaml`).
 - Tests: `uv run pytest`. DB tests need `TEST_DATABASE_URL` pointing at a migrated database whose
   name ends in `_test` (it is truncated); otherwise they skip.
-- Apply migrations, in order:
-  `for f in db/migrations/*.sql; do psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$f" || break; done`
+- Apply pending migrations: `db/migrate.sh [DATABASE_URL]` (loads `.env`; skips versions already
+  in `schema_migrations`). Every new migration must end, inside its transaction, with
+  `INSERT INTO schema_migrations (version) VALUES ('NNNN');`.
+- `.env` is never read by Claude. Shell commands load it with `set -a; source .env; set +a`;
+  jobs load it themselves via python-dotenv. Check a variable with `[ -n "$VAR" ] && echo set`.
 
 ## Open questions (waiting on client)
 - Geography for MVP (DFW first?), SOSDirect access, producer assignment rule
